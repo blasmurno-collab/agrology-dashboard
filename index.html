@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agrology — Dashboard CEO · Huella de Carbono 25/26</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const PRECIO_HA = 1.4;
+const SHEET_KEY = '2PACX-1vQyg9v2Figm7vbdfuz5--NhoOnHiJHqztSTKqk5pEo2DcOGIdaDOJgvf-XnDBMDXq2dqdslcDSAV1SX';
+const PIPELINE_GID = '950241264';
+const ACTIVIDAD_GID = '1902227554';
+
+let chartDia = null, chartHas = null;
+
+// Google Visualization Query API — no CORS restrictions
+function querySheet(gid) {
+  return new Promise((resolve, reject) => {
+    const callbackName = 'cb_' + gid + '_' + Date.now();
+    const url = `https://docs.google.com/spreadsheets/d/e/${SHEET_KEY}/gviz/tq?tqx=out:json&tq=select%20*&gid=${gid}&headers=1`;
+    
+    window[callbackName] = function(data) {
+      delete window[callbackName];
+      document.getElementById('script_' + gid)?.remove();
+      try {
+        // Google wraps response in google.visualization.Query.setResponse(...)
+        const json = typeof data === 'string' 
+          ? JSON.parse(data.replace(/^[^(]+\(/, '').replace(/\);?\s*$/, ''))
+          : data;
+        
+        const cols = json.table.cols.map(c => c.label || c.id);
+        const rows = json.table.rows.map(r => {
+          const obj = {};
+          r.c.forEach((cell, i) => {
+            obj[cols[i]] = cell ? (cell.f || cell.v || '') : '';
+          });
+          return obj;
+        });
+        resolve(rows);
+      } catch(e) { reject(e); }
+    };
+
+    const script = document.createElement('script');
+    script.id = 'script_' + gid;
+    script.src = url + `&jsonp=${callbackName}`;
+    script.onerror = () => reject(new Error('Script load failed'));
+    document.head.appendChild(script);
+    setTimeout(() => reject(new Error('Timeout')), 10000);
+  });
+}
+
+function fmt(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'k';
+  return Math.round(n).toLocaleString('es-AR');
+}
+function fmtUSD(n) {
+  if (n >= 1e6) return '$'+(n/1e6).toFixed(2)+'M';
+  if (n >= 1e3) return '$'+Math.round(n/1e3)+'k';
+  return '$'+Math.round(n).toLocaleString('es-AR');
+}
+function today() {
+  const d = new Date();
+  return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+}
+
+const ETAPAS = [
+  { key:'Lead',            color:'#4F8EF7', bg:'rgba(79,142,247,.15)', pct:.10 },
+  { key:'Lead Calificado', color:'#F5A524', bg:'rgba(245,165,36,.15)', pct:.50 },
+  { key:'Trámite Iniciado',color:'#7A8AA8', bg:'rgba(122,138,168,.12)',pct:.80 },
+  { key:'Trámite Ganado',  color:'#2DD4A0', bg:'rgba(45,212,160,.15)', pct:1.0 },
+];
+
+const AV_COLORS = {
+  'Agustín': {bg:'rgba(79,142,247,.2)', color:'#93C5FD'},
+  'Blas':    {bg:'rgba(45,212,160,.2)', color:'#6EE7C7'},
+  'Joaquín': {bg:'rgba(245,165,36,.2)', color:'#FCD34D'},
+};
+
+async function loadData() {
+  document.getElementById('loading').classList.remove('hidden');
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('err-banner').classList.remove('show');
+
+  try {
+    const [pipRows, actRows] = await Promise.all([
+      querySheet(PIPELINE_GID),
+      querySheet(ACTIVIDAD_GID)
+    ]);
+    renderDashboard(pipRows, actRows);
+  } catch(e) {
+    console.error('Error cargando datos:', e);
+    document.getElementById('err-banner').classList.add('show');
+    renderDashboard([], []);
+  } finally {
+    document.getElementById('loading').classList.add('hidden');
+    document.getElementById('app').style.display = 'block';
+  }
+}
+
+function renderDashboard(pipRows, actRows) {
+  const now = new Date();
+  const todayStr = today();
+  document.getElementById('pill-fecha').textContent =
+    now.toLocaleDateString('es-AR',{weekday:'short',day:'numeric',month:'short'});
+  document.getElementById('act-date-badge').textContent = todayStr;
+
+  // ── Pipeline stats ──────────────────────────────────────────────────────
+  const byEtapa = {};
+  ETAPAS.forEach(e => byEtapa[e.key] = {count:0, has:0});
+
+  pipRows.forEach(r => {
+    // Find etapa and has columns flexibly
+    const etapa = r['Etapa'] || r['Estado'] || r['F'] || '';
+    const hasVal = r['Total Has'] || r['G'] || r['total_has'] || '0';
+    const has = parseFloat(String(hasVal).replace(/[^0-9.]/g,'')) || 0;
+    if (!etapa) return;
+    if (!byEtapa[etapa]) byEtapa[etapa] = {count:0, has:0};
+    byEtapa[etapa].count++;
+    byEtapa[etapa].has += has;
+  });
+
+  const totalProd = Object.values(byEtapa).reduce((s,v)=>s+v.count,0) || pipRows.length;
+  const totalHas  = Object.values(byEtapa).reduce((s,v)=>s+v.has,0);
+  const totalUSD  = ETAPAS.reduce((s,e)=>s+(byEtapa[e.key]?.has||0)*e.pct*PRECIO_HA,0);
+
+  document.getElementById('kpi-productores').textContent = totalProd.toLocaleString('es-AR');
+  document.getElementById('kpi-prod-sub').textContent =
+    ETAPAS.map(e=>`${(byEtapa[e.key]?.count||0)} ${e.key.toLowerCase().split(' ')[0]}`).join(' · ');
+  document.getElementById('kpi-has').textContent = fmt(totalHas);
+  document.getElementById('kpi-usd').textContent = fmtUSD(totalUSD);
+
+  // ── Funnel table ─────────────────────────────────────────────────────────
+  const fb = document.getElementById('funnel-body');
+  fb.innerHTML = '';
+  ETAPAS.forEach(e => {
+    const d = byEtapa[e.key] || {count:0,has:0};
+    const usd = Math.round(d.has * e.pct * PRECIO_HA);
+    const barPct = totalHas > 0 ? Math.round((d.has/totalHas)*100) : 0;
+    const dist = totalHas > 0 ? Math.round((d.has/totalHas)*100) : 0;
+    fb.innerHTML += `
+    <div class="frow">
+      <div class="frow-name">
+        <div class="frow-dot" style="background:${e.color}"></div>
+        ${e.key}
+        <span class="frow-pct" style="background:${e.bg};color:${e.color}">${Math.round(e.pct*100)}%</span>
+      </div>
+      <div class="frow-n">${d.count}</div>
+      <div class="frow-has">
+        <div class="frow-has-main" style="color:${e.color}">${fmt(d.has)}</div>
+        <div class="frow-has-bar" style="background:${e.color};width:${barPct}%"></div>
+      </div>
+      <div class="frow-usd" style="color:${e.color}">${fmtUSD(usd)}</div>
+      <div class="frow-dist"><span class="frow-dist-val">${dist}%</span></div>
+    </div>`;
+  });
+  document.getElementById('ft-count').textContent = totalProd.toLocaleString('es-AR');
+  document.getElementById('ft-has').textContent = fmt(totalHas);
+  document.getElementById('ft-usd').textContent = fmtUSD(totalUSD);
+
+  // ── Actividad hoy ────────────────────────────────────────────────────────
+  const actHoy = actRows.filter(r => {
+    const f = String(r['Fecha']||'').trim();
+    return f === todayStr || f === todayStr.replace(/\//g,'-');
+  });
+
+  const nLlam  = actHoy.filter(r=>String(r['Tipo']||'').toLowerCase().includes('llam')).length;
+  const nReun  = actHoy.filter(r=>String(r['Tipo']||'').toLowerCase().includes('reun')).length;
+  const nWa    = actHoy.filter(r=>String(r['Tipo']||'').toLowerCase().includes('whats')||
+                                   String(r['Canal']||'').toLowerCase().includes('whats')).length;
+  const nWins  = actHoy.filter(r=>{
+    const ne = String(r['Nueva etapa']||r['H']||'');
+    return ne.includes('Trámite Iniciado')||ne.includes('Trámite Ganado');
+  }).length;
+  const nTotal = actHoy.length;
+
+  document.getElementById('n-llam').textContent  = nLlam;
+  document.getElementById('n-reun').textContent  = nReun;
+  document.getElementById('n-wa').textContent    = nWa;
+  document.getElementById('n-wins').textContent  = nWins;
+  document.getElementById('kpi-act-hoy').textContent = nTotal;
+  document.getElementById('kpi-act-sub').textContent =
+    `${nReun} reun · ${nLlam} llam · ${nWins} win${nWins!==1?'s':''}`;
+
+  // ── Por comercial ─────────────────────────────────────────────────────────
+  const byPerson = {};
+  actHoy.forEach(r => {
+    const p = String(r['Responsable']||r['B']||'').trim();
+    if (!p) return;
+    if (!byPerson[p]) byPerson[p] = {llam:0,reun:0,wa:0,wins:0};
+    const tipo  = String(r['Tipo']||'').toLowerCase();
+    const canal = String(r['Canal']||'').toLowerCase();
+    const ne    = String(r['Nueva etapa']||r['H']||'');
+    if (tipo.includes('llam')) byPerson[p].llam++;
+    if (tipo.includes('reun')) byPerson[p].reun++;
+    if (tipo.includes('whats')||canal.includes('whats')) byPerson[p].wa++;
+    if (ne.includes('Trámite Iniciado')||ne.includes('Trámite Ganado')) byPerson[p].wins++;
+  });
+
+  const comEl = document.getElementById('com-rows');
+  comEl.innerHTML = '';
+  const people = Object.keys(byPerson).length > 0 ? Object.keys(byPerson) : ['Agustín','Blas'];
+  people.forEach(name => {
+    const d = byPerson[name] || {llam:0,reun:0,wa:0,wins:0};
+    const av = AV_COLORS[name] || {bg:'rgba(122,138,168,.2)',color:'#7A8AA8'};
+    const tot = d.llam+d.reun+d.wa+d.wins;
+    comEl.innerHTML += `
+    <div class="com-row">
+      <div class="avatar" style="background:${av.bg};color:${av.color}">${name[0]}</div>
+      <div class="com-name">${name}</div>
+      <div class="bar-set">
+        <div class="mbar" style="background:rgba(79,142,247,.3);width:${Math.max(22,d.llam*14)}px">${d.llam}</div>
+        <div class="mbar" style="background:rgba(245,165,36,.3);width:${Math.max(22,d.reun*14)}px">${d.reun}</div>
+        <div class="mbar" style="background:rgba(122,138,168,.2);width:${Math.max(22,d.wa*14)}px">${d.wa}</div>
+        ${d.wins>0?`<div class="mbar" style="background:rgba(45,212,160,.3);width:${Math.max(22,d.wins*14)}px">${d.wins}</div>`:''}
+      </div>
+      <span style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:4px">${tot}</span>
+    </div>`;
+  });
+
+  // ── Progreso del mes ──────────────────────────────────────────────────────
+  const mesActual = now.getMonth();
+  const anioActual = now.getFullYear();
+  const actMes = actRows.filter(r => {
+    const f = String(r['Fecha']||'').trim();
+    const parts = f.split(/[\/\-]/);
+    if (parts.length < 3) return false;
+    const m = parseInt(parts[1]) - 1;
+    const y = parseInt(parts[2].length===4 ? parts[2] : '20'+parts[2]);
+    return m === mesActual && y === anioActual;
+  });
+  const reunMes = actMes.filter(r=>String(r['Tipo']||'').toLowerCase().includes('reun')).length;
+  const winsMes = actMes.filter(r=>{
+    const ne = String(r['Nueva etapa']||r['H']||'');
+    return ne.includes('Trámite Iniciado')||ne.includes('Trámite Ganado');
+  }).length;
+
+  const pReun = Math.min(100, Math.round((reunMes/15)*100));
+  const pWins = Math.min(100, Math.round((winsMes/20)*100));
+  document.getElementById('prog-reun-val').textContent = `${reunMes} / 15`;
+  document.getElementById('prog-wins-val').textContent = `${winsMes} / 20`;
+  document.getElementById('prog-reun').style.width = pReun+'%';
+  document.getElementById('prog-wins').style.width = pWins+'%';
+
+  // ── Gráfico día a día ─────────────────────────────────────────────────────
+  const diasDelMes = new Date(anioActual, mesActual+1, 0).getDate();
+  const labels = Array.from({length:diasDelMes},(_,i)=>i+1);
+  const actPorDia = Array(diasDelMes).fill(0);
+  actMes.filter(r=>String(r['Tipo']||'').toLowerCase().includes('reun')).forEach(r => {
+    const f = String(r['Fecha']||'').trim();
+    const parts = f.split(/[\/\-]/);
+    if (parts.length >= 1) {
+      const d = parseInt(parts[0]) - 1;
+      if (d >= 0 && d < diasDelMes) actPorDia[d]++;
+    }
+  });
+
+  if (chartDia) chartDia.destroy();
+  chartDia = new Chart(document.getElementById('chartDia'), {
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        {label:'Target',data:Array(diasDelMes).fill(3),
+         borderColor:'#4F8EF7',borderDash:[5,4],borderWidth:1.5,
+         pointRadius:0,tension:0,fill:false},
+        {label:'Actual',data:actPorDia,
+         borderColor:'#F04060',borderWidth:2,
+         pointRadius:4,pointBackgroundColor:'#F04060',tension:0.3,fill:false},
+      ]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{
+        backgroundColor:'#131720',borderColor:'#1E2535',borderWidth:1,
+        titleColor:'#DCE3F0',bodyColor:'#6B7A99',padding:10,
+        callbacks:{title:c=>`Día ${c[0].label}`}
+      }},
+      scales:{
+        x:{ticks:{color:'#4A5570',font:{size:10},maxTicksLimit:16},
+           grid:{color:'rgba(255,255,255,.03)'},border:{color:'transparent'}},
+        y:{ticks:{color:'#4A5570',font:{size:10},stepSize:1},
+           grid:{color:'rgba(255,255,255,.03)'},border:{color:'transparent'},min:0}
+      }
+    }
+  });
+
+  if (chartHas) chartHas.destroy();
+  chartHas = new Chart(document.getElementById('chartHas'), {
+    type:'bar',
+    data:{
+      labels: ETAPAS.map(e=>e.key),
+      datasets:[{
+        data: ETAPAS.map(e=>(byEtapa[e.key]?.has||0)),
+        backgroundColor: ETAPAS.map(e=>e.bg),
+        borderColor: ETAPAS.map(e=>e.color),
+        borderWidth:1,borderRadius:6,
+      }]
+    },
+    options:{
+      indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{
+        backgroundColor:'#131720',borderColor:'#1E2535',borderWidth:1,
+        titleColor:'#DCE3F0',bodyColor:'#6B7A99',padding:10,
+        callbacks:{label:c=>`${Math.round(c.raw).toLocaleString('es-AR')} has`}
+      }},
+      scales:{
+        x:{ticks:{color:'#4A5570',font:{size:10},
+                  callback:v=>v>=1e6?`${(v/1e6).toFixed(1)}M`:v>=1e3?`${(v/1e3).toFixed(0)}k`:v},
+           grid:{color:'rgba(255,255,255,.03)'},border:{color:'transparent'}},
+        y:{ticks:{color:'#DCE3F0',font:{size:11}},
+           grid:{display:false},border:{color:'transparent'}}
+      }
+    }
+  });
+}
+
+loadData();
+setInterval(loadData, 5 * 60 * 1000);
+</script>
+</body>
+</html>
